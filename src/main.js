@@ -35,6 +35,7 @@ function newItem(v) {
   const t = v['type']; // XXX Noms can't deal with a field named 'type'...
   delete v['type'];
   v['kids'] = new List(v['kids']);
+  v['parts'] = new List(v['parts']);
   const item = newStruct(t, v);
 
   changed = true;
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
 
   maxItem = v.val();
   lastItem = 0;
-  //lastItem = maxItem - 10;
+  // lastItem = 126864;
 
   pg = new Pace({
     'total': maxItem + 1
