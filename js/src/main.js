@@ -99,7 +99,7 @@ async function main(): Promise<void> {
   });
 
   // Subscribe to updates.
-  fdb.ref("v0/updates").on('value', v => {
+  fdb.ref("/v0/updates").on('value', v => {
     //console.log(v.val()['items']);
     v.val()['items'].forEach(n => {
       if (n <= lastItem)
