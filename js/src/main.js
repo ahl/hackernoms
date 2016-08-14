@@ -1,5 +1,9 @@
 // @flow
 
+// Copyright 2016 Adam H. Leventhal. All rights reserved.
+// Licensed under the Apache License, version 2.0:
+// http://www.apache.org/licenses/LICENSE-2.0
+
 import firebase from 'firebase';
 import async from 'async';
 import { newStruct, Map, List, DatasetSpec, Dataset } from '@attic/noms';
