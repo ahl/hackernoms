@@ -43,7 +43,7 @@ func NewItemIterator() *ItemIterator {
 
 	ii.maxItem = uint32(val)
 	ii.nextItem = 1
-	//ii.nextItem = ii.maxItem - 10
+	ii.nextItem = ii.maxItem - 4000
 
 	maxNotify := make(chan firego.Event)
 	if err := ii.max.Watch(maxNotify); err != nil {
@@ -90,7 +90,7 @@ func (ii *ItemIterator) addExtra(item uint32) {
 }
 
 // Return the next element; block if none is available.
-func (ii *ItemIterator) Next() uint32 {
+func (ii *ItemIterator) Next() (uint32, bool) {
 	ii.lock.Lock()
 	defer ii.lock.Unlock()
 
@@ -98,13 +98,13 @@ func (ii *ItemIterator) Next() uint32 {
 		if ll := len(ii.extraItems); ll != 0 {
 			item := ii.extraItems[ll-1]
 			ii.extraItems = ii.extraItems[:ll-1]
-			return item
+			return item, true
 		}
 
 		if ii.nextItem <= ii.maxItem {
 			item := ii.nextItem
 			ii.nextItem += 1
-			return item
+			return item, false
 		}
 
 		ii.cv.Wait()
@@ -116,9 +116,10 @@ func (ii *ItemIterator) Max() uint32 {
 }
 
 type datum struct {
-	id    uint64
+	id    uint32
 	key   types.Number
 	value types.Struct
+	extra bool
 }
 
 func main() {
@@ -149,7 +150,9 @@ func main() {
 	var count uint32
 	for {
 		d := <-newData
-		count += 1
+		if !d.extra {
+			count += 1
+		}
 
 		// XXX move status reporting out of here to a different go routine
 		total := ii.Max()
@@ -158,14 +161,15 @@ func main() {
 			eta := time.Duration(float64(dur) * float64(total-count) / float64(count))
 
 			fmt.Printf("sent:  %d/%d  time remaining: %s\n", d.id, total, eta)
-			fmt.Println(count, " <=> ", total-uint32(depth)*2)
+			fmt.Println(d.id, " <=> ", total-uint32(depth)*2)
 		}
 
 		streamData <- d.key
 		streamData <- d.value
 
 		// Too close for missiles; switching to guns. Close down the stream which will trigger the initial creation of the Map; exit the loop to wait for it to show up. Even though we try to drain newData, there may still be data left in newData, but we can pick that up later.
-		if count > total-uint32(depth)*2 {
+		//if count > total-uint32(depth)*2 {
+		if d.id > total-uint32(depth)*2 {
 			// if count > 10000 {
 			done := false
 			for !done {
@@ -210,7 +214,15 @@ func main() {
 
 	for {
 		d := <-newData
-		batchSize := 1
+
+		newCount := 0
+		extraCount := 0
+		if d.extra {
+			extraCount += 1
+		} else {
+			newCount += 1
+		}
+
 		mm = mm.Set(d.key, d.value)
 
 		last := time.Now()
@@ -218,16 +230,20 @@ func main() {
 		for !blocked && time.Since(last) < 5*time.Second {
 			select {
 			case d = <-newData:
-				batchSize += 1
+				if d.extra {
+					extraCount += 1
+				} else {
+					newCount += 1
+				}
 				mm = mm.Set(d.key, d.value)
 			default:
 				blocked = true
 			}
 		}
 
-		fmt.Printf("sent:  %d %d\n", batchSize, len(ii.extraItems))
+		fmt.Printf("new: %d extra: %d   extras: %d\n", newCount, extraCount, len(ii.extraItems))
 
-		// Poke our new map in there. If an old one is still in there, nudge it out and add our new one.
+		// Poke our new map into the chan. If an old one is still in there, nudge it out and add our new one.
 		select {
 		case getMap <- mm:
 		default:
@@ -258,8 +274,8 @@ func churn(newData chan<- datum, ii *ItemIterator) {
 	}
 
 	for {
-		item := ii.Next()
-		url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d", item)
+		id, extra := ii.Next()
+		url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d", id)
 		for {
 			fb := firego.New(url, client)
 
@@ -294,9 +310,10 @@ func churn(newData chan<- datum, ii *ItemIterator) {
 			if ok {
 				st := types.NewStruct(name.(string), data)
 				d := datum{
-					id:    uint64(val["id"].(float64)),
+					id:    id,
 					key:   data["id"].(types.Number),
 					value: st,
+					extra: extra,
 				}
 
 				select {
