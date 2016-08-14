@@ -43,7 +43,7 @@ func NewItemIterator() *ItemIterator {
 
 	ii.maxItem = uint32(val)
 	ii.nextItem = 1
-	//ii.nextItem = ii.maxItem - 4000
+	//ii.nextItem = ii.maxItem - 100000
 
 	maxNotify := make(chan firego.Event)
 	if err := ii.max.Watch(maxNotify); err != nil {
@@ -148,10 +148,16 @@ func main() {
 	}
 
 	var count uint32
+	var newCount uint32
+	var extraCount uint32
 	for {
 		d := <-newData
-		if !d.extra {
-			count += 1
+
+		count += 1
+		if d.extra {
+			extraCount += 1
+		} else {
+			newCount += 1
 		}
 
 		// XXX move status reporting out of here to a different go routine
@@ -160,7 +166,7 @@ func main() {
 			dur := time.Since(start)
 			eta := time.Duration(float64(dur) * float64(total-count) / float64(count))
 
-			fmt.Printf("sent:  %d/%d (%d) time remaining: %s\n", count, total, d.id, eta)
+			fmt.Printf("sent:  %d/%d (%d) (%d) time remaining: %s\n", newCount, total, d.id, extraCount, eta)
 		}
 
 		streamData <- d.key
@@ -207,7 +213,6 @@ func main() {
 
 	fmt.Println("processing...")
 
-	// XXX make sure we're converging; look at the length of the extras array.
 	// XXX better status reporting since this is the persistent mode of operation.
 	// XXX figure out what I want to do if we come up and there's data already loaded.
 
@@ -258,18 +263,16 @@ func main() {
 func churn(newData chan<- datum, ii *ItemIterator) {
 	var tr *http.Transport
 	tr = &http.Transport{
-		//DisableKeepAlives: true, // https://code.google.com/p/go/issues/detail?id=3514
 		Dial: func(network, address string) (net.Conn, error) {
-			start := time.Now()
-			c, err := net.DialTimeout(network, address, firego.TimeoutDuration)
-			tr.ResponseHeaderTimeout = firego.TimeoutDuration - time.Since(start)
-			return c, err
+			return net.DialTimeout(network, address, 5*time.Second)
 		},
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
 	}
 
 	client := &http.Client{
 		Transport: tr,
-		//CheckRedirect: redirectPreserveHeaders,
+		Timeout:   time.Second * 5,
 	}
 
 	for {
