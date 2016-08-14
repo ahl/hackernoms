@@ -144,7 +144,7 @@ func main() {
 
 	// Grab the data from hacker news.
 	for i := 0; i < 500; i++ {
-		go churn(newData, ii)
+		go churn(newData, ii, i)
 	}
 
 	var count uint32
@@ -260,7 +260,7 @@ func main() {
 	}
 }
 
-func churn(newData chan<- datum, ii *ItemIterator) {
+func makeClient() *http.Client {
 	var tr *http.Transport
 	tr = &http.Transport{
 		Dial: func(network, address string) (net.Conn, error) {
@@ -275,17 +275,29 @@ func churn(newData chan<- datum, ii *ItemIterator) {
 		Timeout:   time.Second * 5,
 	}
 
+	return client
+}
+
+func churn(newData chan<- datum, ii *ItemIterator, me int) {
+	client := makeClient()
+
 	for {
 		id, extra := ii.Next()
 		url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d", id)
+		failures := 0
 		for {
 			fb := firego.New(url, client)
 
 			var val map[string]interface{}
 			err := fb.Value(&val)
 			if err != nil {
+				failures += 1
+				fmt.Printf("(%d) failed for %d (%d times)\n", me, id, failures)
+				if failures > 10 {
+					client = makeClient()
+				}
+				time.Sleep(time.Millisecond * 100)
 				continue
-				//panic(err)
 			}
 
 			data := make(map[string]types.Value)
