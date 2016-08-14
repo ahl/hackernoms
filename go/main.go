@@ -158,6 +158,7 @@ func main() {
 			eta := time.Duration(float64(dur) * float64(total-count) / float64(count))
 
 			fmt.Printf("sent:  %d/%d  time remaining: %s\n", d.id, total, eta)
+			fmt.Println(count, " <=> ", total-uint32(depth)*2)
 		}
 
 		streamData <- d.key
@@ -298,7 +299,6 @@ func churn(newData chan<- datum, ii *ItemIterator) {
 					value: st,
 				}
 
-				newData <- d
 				select {
 				case newData <- d:
 				default:
