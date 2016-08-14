@@ -43,7 +43,7 @@ func NewItemIterator() *ItemIterator {
 
 	ii.maxItem = uint32(val)
 	ii.nextItem = 1
-	ii.nextItem = ii.maxItem - 4000
+	//ii.nextItem = ii.maxItem - 4000
 
 	maxNotify := make(chan firego.Event)
 	if err := ii.max.Watch(maxNotify); err != nil {
@@ -160,8 +160,7 @@ func main() {
 			dur := time.Since(start)
 			eta := time.Duration(float64(dur) * float64(total-count) / float64(count))
 
-			fmt.Printf("sent:  %d/%d  time remaining: %s\n", d.id, total, eta)
-			fmt.Println(d.id, " <=> ", total-uint32(depth)*2)
+			fmt.Printf("sent:  %d/%d (%d) time remaining: %s\n", count, total, d.id, eta)
 		}
 
 		streamData <- d.key
