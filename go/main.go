@@ -336,6 +336,10 @@ func churn(newData chan<- datum, ii *ItemIterator, me int) {
 					fmt.Println("blocked")
 					newData <- d
 				}
+
+				if failures > 1 {
+					fmt.Printf("(%d) success for %d after %d failures\n", me, id, failures)
+				}
 				break
 			}
 		}
