@@ -9,7 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
-	//"os"
+	"os"
 	//"os/signal"
 	"reflect"
 	"sync"
@@ -124,11 +124,13 @@ func (ii *ItemIterator) Next() (uint32, itemKind) {
 			return id, NORMAL
 		}
 
-		if ll := len(ii.zombieItems); ll != 0 {
-			id := ii.zombieItems[ll-1]
-			ii.zombieItems = ii.zombieItems[:ll-1]
-			return id, ZOMBIE
-		}
+		/*
+			if ll := len(ii.zombieItems); ll != 0 {
+				id := ii.zombieItems[ll-1]
+				ii.zombieItems = ii.zombieItems[:ll-1]
+				return id, ZOMBIE
+			}
+		*/
 
 		ii.cv.Wait()
 	}
