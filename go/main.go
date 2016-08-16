@@ -52,7 +52,7 @@ func NewItemIterator() *ItemIterator {
 
 	ii.maxItem = uint32(val)
 	ii.nextItem = 1
-	//ii.nextItem = ii.maxItem - 100000
+	ii.nextItem = ii.maxItem - 10000
 	//ii.nextItem = 9748489 - 10000
 
 	maxNotify := make(chan firego.Event)
@@ -244,6 +244,7 @@ func main() {
 
 	// XXX better status reporting since this is the persistent mode of operation.
 	// XXX figure out what I want to do if we come up and there's data already loaded.
+	// XXX double check for empty commits
 
 	for {
 		d := <-newData
@@ -265,7 +266,7 @@ func main() {
 			}
 		}
 
-		fmt.Printf("n/x/z: %d/%d/%d  queued x/z: %d/%d", counts[NORMAL], counts[EXTRA], counts[ZOMBIE], len(ii.extraItems), len(ii.zombieItems))
+		fmt.Printf("n/x/z: %d/%d/%d  queued x/z: %d/%d\n", counts[NORMAL], counts[EXTRA], counts[ZOMBIE], len(ii.extraItems), len(ii.zombieItems))
 
 		// Poke our new map into the chan. If an old one is still in there, nudge it out and add our new one.
 		select {
@@ -306,7 +307,7 @@ func churn(newData chan<- datum, ii *ItemIterator, me int) {
 		url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d", id)
 		for attempts := 0; true; attempts += 1 {
 
-			if attempts > 2 {
+			if attempts > 0 {
 				// If we're having no luck after this much time, we'll declare this sucker the walking undead and try to get to it later.
 				if attempts > 10 {
 					fmt.Printf("Braaaaiiinnnssss %d\n", id)
@@ -354,7 +355,7 @@ func churn(newData chan<- datum, ii *ItemIterator, me int) {
 
 			name, ok := val["type"]
 			if !ok {
-				fmt.Printf("no type for id %d; trying again\n", id)
+				fmt.Printf("no type for id %d; trying again (%d)\n", id, ii.maxItem)
 				continue
 			}
 
