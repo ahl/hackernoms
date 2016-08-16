@@ -5,12 +5,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
 	"os"
-	//"os/signal"
 	"reflect"
 	"sync"
 	"time"
@@ -148,16 +148,25 @@ type datum struct {
 }
 
 func main() {
-	fmt.Println("starting")
+	flag.Usage = func() {
+		fmt.Printf("Usage: %s <dest-dataset-spec>\n", os.Args[0])
+	}
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Println("Required dest-dataset param not provided")
+		return
+	}
 
-	ii := NewItemIterator()
-
-	ds, err := spec.GetDataset("http://localhost:8000::hn")
+	ds, err := spec.GetDataset(flag.Arg(0))
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("Could not parse dest-dataset: %s\n", err)
 		return
 	}
 	defer ds.Database().Close()
+
+	fmt.Println("starting")
+
+	ii := NewItemIterator()
 
 	depth := 150
 	newData := make(chan datum, depth)
