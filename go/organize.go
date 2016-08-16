@@ -53,7 +53,7 @@ func main() {
 	}
 	flag.Parse()
 	if flag.NArg() != 2 {
-		fmt.Println("Required dest-dataset param not provided")
+		flag.Usage()
 		return
 	}
 
@@ -107,33 +107,25 @@ func main() {
 		{"comments", types.MakeListType(commentType.t)},
 	})
 
-	s := NewStructWithType(storyType, types.ValueSlice{
-		types.Number(100),
-		types.Number(500),
-		nothing,
-		nothing,
-		nothing,
-		nothing,
-		nothing,
-		types.String("URL"),
-		nothing,
-		types.NewList(),
-	})
-
-	fmt.Println(types.EncodedIndexValue(s))
-
 	mm := source.HeadValue().(types.Map)
+
+	start, ok := ds.MaybeHeadValue()
+	if !ok {
+		start = types.Number(1)
+	}
 
 	newItem := make(chan types.Struct, 100)
 	newStory := make(chan types.Value, 100)
 
 	go func() {
-		mm.IterAll(func(id, value types.Value) {
+		mm.IterFrom(start, func(id, value types.Value) bool {
 			item := value.(types.Struct)
 
 			if item.Type().Desc.(types.StructDesc).Name == "story" {
 				newItem <- item
 			}
+
+			return false
 		})
 		close(newItem)
 	}()
@@ -143,16 +135,10 @@ func main() {
 			for item := range newItem {
 				id := item.Get("id")
 
-				// Blacklist
-				switch float64(id.(types.Number)) {
-				case 78692, 78693, 78759, 78799, 78802, 78817, 78825, 78822, 78737, 78866:
+				// Known stubs with just id and type
+				if fields := item.ChildValues(); len(fields) == 2 {
+					item.Get("type") // or panic
 					continue
-				}
-
-				_, ok := item.MaybeGet("time")
-				if !ok {
-					fmt.Println(types.EncodedIndexValue(item))
-					panic(item)
 				}
 
 				newStory <- NewStructWithType(storyType, types.ValueSlice{
@@ -172,7 +158,15 @@ func main() {
 	}
 
 	for story := range newStory {
-		fmt.Println(types.EncodedIndexValue(story.(types.Struct).Get("id")))
+		id := story.(types.Struct).Get("id")
+		//fmt.Println(types.EncodedIndexValue(id))
+		fmt.Println(types.EncodedIndexValue(story))
+
+		nds, err := ds.CommitValue(id)
+		if err != nil {
+			panic(err)
+		}
+		ds = nds
 	}
 }
 
