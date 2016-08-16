@@ -5,9 +5,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	//"os"
-	//"os/signal"
+	"os"
 	"sort"
 
 	// "github.com/zabawaba99/firego"
@@ -37,31 +37,60 @@ import (
 //	}>
 // }>
 
-func main() {
-	fmt.Println("starting")
+var nothing types.Value
+var nothingType *types.Type
 
-	source, err := spec.GetDataset("http://localhost:8000::hn")
+func init() {
+	nothing = types.NewStruct("Nothing", types.StructData{})
+	nothingType = nothing.Type()
+}
+
+var commentType *StructType
+
+func main() {
+	flag.Usage = func() {
+		fmt.Printf("Usage: %s <src-dataset-spec> <dst-dataset-spec>\n", os.Args[0])
+	}
+	flag.Parse()
+	if flag.NArg() != 2 {
+		fmt.Println("Required dest-dataset param not provided")
+		return
+	}
+
+	source, err := spec.GetDataset(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer source.Database().Close()
 
-	ds, err := spec.GetDataset("http://localhost:8000::hn_org")
+	ds, err := spec.GetDataset(os.Args[2])
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer ds.Database().Close()
 
-	nothing := types.NewStruct("Nothing", types.StructData{})
-	nothingType := nothing.Type()
+	fmt.Println("starting")
 
 	optionString := types.MakeUnionType(types.StringType, nothingType)
 	optionNumber := types.MakeUnionType(types.NumberType, nothingType)
 	optionBool := types.MakeUnionType(types.BoolType, nothingType)
 
-	storyType := MakeStructType("Comment", []FieldType{
+	commentType = MakeStructType("Comment", []FieldType{
+		{"id", types.NumberType},
+		{"time", types.NumberType},
+
+		{"deleted", optionBool},
+		{"dead", optionBool},
+
+		{"text", optionString},
+		{"by", optionString},
+
+		{"comments", types.MakeListType(types.MakeCycleType(0))},
+	})
+
+	storyType := MakeStructType("Story", []FieldType{
 		{"id", types.NumberType},
 		{"time", types.NumberType},
 
@@ -74,6 +103,8 @@ func main() {
 		{"text", optionString},
 		{"url", optionString},
 		{"by", optionString},
+
+		{"comments", types.MakeListType(commentType.t)},
 	})
 
 	s := NewStructWithType(storyType, types.ValueSlice{
@@ -86,14 +117,106 @@ func main() {
 		nothing,
 		types.String("URL"),
 		nothing,
+		types.NewList(),
 	})
 
 	fmt.Println(types.EncodedIndexValue(s))
+
+	mm := source.HeadValue().(types.Map)
+
+	newItem := make(chan types.Struct, 100)
+	newStory := make(chan types.Value, 100)
+
+	go func() {
+		mm.IterAll(func(id, value types.Value) {
+			item := value.(types.Struct)
+
+			if item.Type().Desc.(types.StructDesc).Name == "story" {
+				newItem <- item
+			}
+		})
+		close(newItem)
+	}()
+
+	for i := 0; i < 100; i += 1 {
+		go func() {
+			for item := range newItem {
+				id := item.Get("id")
+
+				// Blacklist
+				switch float64(id.(types.Number)) {
+				case 78692, 78693, 78759, 78799, 78802, 78817, 78825, 78822, 78737, 78866:
+					continue
+				}
+
+				_, ok := item.MaybeGet("time")
+				if !ok {
+					fmt.Println(types.EncodedIndexValue(item))
+					panic(item)
+				}
+
+				newStory <- NewStructWithType(storyType, types.ValueSlice{
+					id,
+					item.Get("time"),
+					OptionGet(item, "deleted"),
+					OptionGet(item, "dead"),
+					OptionGet(item, "descendants"),
+					OptionGet(item, "score"),
+					OptionGet(item, "text"),
+					OptionGet(item, "url"),
+					OptionGet(item, "by"),
+					comments(item, mm),
+				})
+			}
+		}()
+	}
+
+	for story := range newStory {
+		fmt.Println(types.EncodedIndexValue(story.(types.Struct).Get("id")))
+	}
+}
+
+func OptionGet(st types.Struct, field string) types.Value {
+	value, ok := st.MaybeGet(field)
+	if ok {
+		return value
+	} else {
+		return nothing
+	}
+}
+
+// |item| could be a story or a comment
+func comments(item types.Value, all types.Map) types.Value {
+	ret := types.NewList()
+
+	c, ok := item.(types.Struct).MaybeGet("kids")
+	if ok {
+		c.(types.List).IterAll(func(id types.Value, _ uint64) {
+			value, ok := all.MaybeGet(id)
+			if !ok {
+				panic("well shit")
+			}
+
+			subitem := value.(types.Struct)
+
+			comm := NewStructWithType(commentType, types.ValueSlice{
+				id,
+				subitem.Get("time"),
+				OptionGet(subitem, "deleted"),
+				OptionGet(subitem, "dead"),
+				OptionGet(subitem, "text"),
+				OptionGet(subitem, "by"),
+				comments(subitem, all),
+			})
+			ret = ret.Append(comm)
+		})
+	}
+
+	return ret
 }
 
 type StructType struct {
-	*types.Type
-
+	t     *types.Type
 	xform []int
 }
 
@@ -132,9 +255,6 @@ func MakeStructType(name string, fields []FieldType) *StructType {
 
 	t := types.MakeStructType(name, ns, ts)
 
-	//types.NewStructWithType
-
-	fmt.Println(xform)
 	return &StructType{t, xform}
 }
 
@@ -145,5 +265,5 @@ func NewStructWithType(t *StructType, values types.ValueSlice) types.Value {
 		v[to] = values[from]
 	}
 
-	return types.NewStructWithType(t.Type, v)
+	return types.NewStructWithType(t.t, v)
 }
