@@ -140,9 +140,13 @@ func main() {
 	})
 
 	for datum := range newDatum {
-		mm = mm.Set(types.Number(datum.index), datum.value)
-		fmt.Printf("%d/%d\n", int(datum.index), int(maxItem))
-		//fmt.Println(types.EncodedIndexValue(datum.value))
+		nmm := mm.Set(types.Number(datum.index), datum.value)
+		if mm.Equals(nmm) {
+			fmt.Printf("%d/%d no change\n", int(datum.index), int(maxItem))
+		} else {
+			mm = nmm
+			fmt.Printf("%d/%d\n", int(datum.index), int(maxItem))
+		}
 	}
 
 	fmt.Println("caught up")
