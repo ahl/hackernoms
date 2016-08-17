@@ -168,6 +168,8 @@ func main() {
 		}
 		ds = nds
 	}
+
+	fmt.Println("done")
 }
 
 func OptionGet(st types.Struct, field string) types.Value {
