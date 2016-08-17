@@ -188,10 +188,17 @@ func comments(item types.Value, all types.Map) types.Value {
 		c.(types.List).IterAll(func(id types.Value, _ uint64) {
 			value, ok := all.MaybeGet(id)
 			if !ok {
-				panic("well shit")
+				panic(fmt.Sprintf("unable to look up %d", int(id.(types.Number))))
 			}
 
 			subitem := value.(types.Struct)
+
+			_, ok = subitem.MaybeGet("time")
+			if !ok {
+				fmt.Println(types.EncodedIndexValue(item))
+				fmt.Println(types.EncodedIndexValue(subitem))
+				panic("bad comment")
+			}
 
 			comm := NewStructWithType(commentType, types.ValueSlice{
 				id,
