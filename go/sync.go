@@ -49,7 +49,21 @@ func main() {
 	}
 	defer ds.Database().Close()
 
-	mm := ds.HeadValue().(types.Map)
+	// Grab the root struct; convert from the old format if needed.
+	var head types.Struct
+	hv := ds.HeadValue()
+
+	switch h := hv.(type) {
+	case types.Map:
+		head = types.NewStruct("HackerNoms", types.StructData{
+			"items": h,
+			"top":   types.NewList(types.Number(0)),
+		})
+	case types.Struct:
+		head = h
+	}
+
+	mm := head.Get("items").(types.Map)
 
 	if start == -1 {
 		// Find the last entry that has a time field.
@@ -78,15 +92,13 @@ func main() {
 		start = int(time.(types.Number)) - HNWINDOW
 	}
 
-	fmt.Println(start)
-
 	// Find the starting key.
+	startKey, startVal := mapFindKeyBefore(mm, start)
+	tt := startVal.(types.Struct).Get("time").(types.Number)
+	fmt.Println(types.EncodedIndexValue(startVal))
+	fmt.Printf("posted %s ago\n", time.Since(time.Unix(int64(tt), 0)))
 
-	startKey := mapFindKeyBefore(mm, start)
-	fmt.Println(types.EncodedIndexValue(startKey))
-
-	// Process from startKey to maxItem to get caught up.
-
+	// Process from startKey to maxItem to get caught up. We update maxItem based on items that we see in updates.
 	update := firego.New("https://hacker-news.firebaseio.com/v0/updates", nil)
 	newUpdate := make(chan firego.Event, 1000)
 	if err := update.Watch(newUpdate); err != nil {
@@ -151,20 +163,20 @@ func main() {
 
 	fmt.Println("caught up")
 
-	newMap := make(chan types.Map, 1) // This must be size 1
+	newHead := make(chan types.Struct, 1) // This must be size 1
 
 	go func() {
-		mm := ds.HeadValue().(types.Map)
+		oldHead := ds.HeadValue()
 		for {
-			mp := <-newMap
-			if !mm.Equals(mp) {
+			head := <-newHead
+			if !head.Equals(oldHead) {
 				fmt.Println("committing")
-				nds, err := ds.CommitValue(mp)
+				nds, err := ds.CommitValue(head)
 				if err != nil {
 					panic(err)
 				}
 				ds = nds
-				mm = mp
+				oldHead = head
 				fmt.Println("commit complete")
 			} else {
 				fmt.Println("no change")
@@ -172,7 +184,8 @@ func main() {
 		}
 	}()
 
-	newMap <- mm
+	head = head.Set("items", mm)
+	newHead <- head
 
 	// Enter the steady state now that we're caught up
 	newIndex = make(chan float64, 1)
@@ -197,6 +210,7 @@ func main() {
 		}
 
 		fmt.Println("batch")
+		oldMap := mm
 		for len(remaining) != 0 {
 			datum := <-newDatum
 			nmm := mm.Set(types.Number(datum.index), datum.value)
@@ -210,15 +224,18 @@ func main() {
 			delete(remaining, datum.index)
 		}
 
-		// Poke our new map into the chan. If an old one is still in there, nudge it out and add our new one.
-		select {
-		case newMap <- mm:
-		default:
+		if !oldMap.Equals(mm) {
+			head = head.Set("items", mm)
+			// Poke our new head into the chan. If an old one is still in there, nudge it out and add our new one.
 			select {
-			case _ = <-newMap:
+			case newHead <- head:
 			default:
+				select {
+				case _ = <-newHead:
+				default:
+				}
+				newHead <- head
 			}
-			newMap <- mm
 		}
 	}
 }
@@ -257,7 +274,7 @@ func mapFindFromKey(mm types.Map, value int) (types.Value, types.Value) {
 	panic("nothing found")
 }
 
-func mapFindKeyBefore(mm types.Map, time int) types.Number {
+func mapFindKeyBefore(mm types.Map, time int) (types.Number, types.Value) {
 	minKey, _ := mm.First()
 	maxKey, _ := mm.Last()
 
@@ -267,8 +284,7 @@ func mapFindKeyBefore(mm types.Map, time int) types.Number {
 		midKey, midVal := mapFindFromKey(mm, midIndex)
 
 		if minKey == midKey {
-			fmt.Println(types.EncodedIndexValue(midVal))
-			return minKey.(types.Number)
+			return midKey.(types.Number), midVal
 		}
 
 		midTime := midVal.(types.Struct).Get("time").(types.Number)
@@ -282,6 +298,7 @@ func mapFindKeyBefore(mm types.Map, time int) types.Number {
 
 	panic("confusing")
 }
+
 func makeClient() *http.Client {
 	var tr *http.Transport
 	tr = &http.Transport{

@@ -10,15 +10,13 @@ import (
 	"os"
 	"sort"
 
-	// "github.com/zabawaba99/firego"
-
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
 
 // Map<number, Struct Story {
 //	id Number
-//	time Number XXX there's at least one with no time; I'll try to find it
+//	time Number
 //
 //	// Optional
 //	deleted, dead Bool
@@ -134,6 +132,7 @@ func main() {
 		go func() {
 			for item := range newItem {
 				id := item.Get("id")
+				fmt.Println(id)
 
 				// Known stubs with just id and type
 				if fields := item.ChildValues(); len(fields) == 2 {
