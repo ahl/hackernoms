@@ -193,11 +193,10 @@ func comments(item types.Value, all types.Map) types.Value {
 
 			subitem := value.(types.Struct)
 
+			// Ignore stubs and zombies
 			_, ok = subitem.MaybeGet("time")
 			if !ok {
-				fmt.Println(types.EncodedIndexValue(item))
-				fmt.Println(types.EncodedIndexValue(subitem))
-				panic("bad comment")
+				return
 			}
 
 			comm := NewStructWithType(commentType, types.ValueSlice{
