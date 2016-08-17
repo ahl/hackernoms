@@ -149,7 +149,8 @@ func main() {
 
 	newMap := make(chan types.Map, 1) // This must be size 1
 
-	go func(mm types.Map) {
+	go func() {
+		mm := ds.HeadValue().(types.Map)
 		for {
 			mp := <-newMap
 			if !mm.Equals(mp) {
@@ -165,7 +166,9 @@ func main() {
 				fmt.Println("no change")
 			}
 		}
-	}(mm)
+	}()
+
+	newMap <- mm
 
 	// Enter the steady state now that we're caught up
 	newIndex = make(chan float64, 1)
@@ -192,9 +195,15 @@ func main() {
 		fmt.Println("batch")
 		for len(remaining) != 0 {
 			datum := <-newDatum
-			mm = mm.Set(types.Number(datum.index), datum.value)
+			nmm := mm.Set(types.Number(datum.index), datum.value)
+			if mm.Equals(nmm) {
+				fmt.Println(int(datum.index), " no change")
+			} else {
+				fmt.Println(int(datum.index))
+				mm = nmm
+			}
+
 			delete(remaining, datum.index)
-			fmt.Println(int(datum.index))
 		}
 
 		// Poke our new map into the chan. If an old one is still in there, nudge it out and add our new one.
