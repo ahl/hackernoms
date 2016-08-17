@@ -74,6 +74,7 @@ func NewItemIterator() *ItemIterator {
 
 	go func() {
 		for event := range updateNotify {
+			// XXX need to check event.Type for errors; not sure what to do if this comes unglued.
 			for _, item := range event.Data.(map[string]interface{})["items"].([]interface{}) {
 				ii.addExtra(uint32(item.(float64)))
 			}
@@ -149,17 +150,17 @@ type datum struct {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Printf("Usage: %s <dest-dataset-spec>\n", os.Args[0])
+		fmt.Printf("Usage: %s <dst-dataset-spec>\n", os.Args[0])
 	}
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Println("Required dest-dataset param not provided")
+		fmt.Println("Required dst-dataset param not provided")
 		return
 	}
 
 	ds, err := spec.GetDataset(flag.Arg(0))
 	if err != nil {
-		fmt.Printf("Could not parse dest-dataset: %s\n", err)
+		fmt.Printf("Could not parse dst-dataset: %s\n", err)
 		return
 	}
 	defer ds.Database().Close()
