@@ -113,6 +113,7 @@ func main() {
 
 	newIndex := make(chan float64, 100)
 
+	// These items may update beyond the standard two week window.
 	specialIndices := []float64{
 		363, // Please tell us what features you'd like in news.ycombinator
 	}
@@ -197,35 +198,59 @@ func main() {
 		close(newDatum)
 	})
 
+	// Also start watching topstories.
+	newTop := make(chan firego.Event)
+	top := firego.New("https://hacker-news.firebaseio.com/v0/topstories", nil)
+	if err := top.Watch(newTop); err != nil {
+		panic(err)
+	}
+
 	remaining := make(map[float64]bool)
-	for event := range newUpdate {
-		if event.Type == firego.EventTypeError {
-			panic(event.Data)
-		}
-
-		items := event.Data.(map[string]interface{})["items"].([]interface{})
-		for _, item := range items {
-			newIndex <- item.(float64)
-			remaining[item.(float64)] = true
-		}
-
-		fmt.Println("batch")
-		oldMap := mm
-		for len(remaining) != 0 {
-			datum := <-newDatum
-			nmm := mm.Set(types.Number(datum.index), datum.value)
-			if mm.Equals(nmm) {
-				fmt.Println(int(datum.index), " no change")
-			} else {
-				fmt.Println(int(datum.index))
-				mm = nmm
+	topItems := make([]types.Value, 0, 500)
+	for {
+		oldHead := head
+		select {
+		case event := <-newUpdate:
+			if event.Type == firego.EventTypeError {
+				panic(event.Data)
 			}
 
-			delete(remaining, datum.index)
+			items := event.Data.(map[string]interface{})["items"].([]interface{})
+			for _, item := range items {
+				newIndex <- item.(float64)
+				remaining[item.(float64)] = true
+			}
+
+			fmt.Println("batch")
+			for len(remaining) != 0 {
+				datum := <-newDatum
+				nmm := mm.Set(types.Number(datum.index), datum.value)
+				if mm.Equals(nmm) {
+					fmt.Println(int(datum.index), " no change")
+				} else {
+					fmt.Println(int(datum.index))
+					mm = nmm
+				}
+
+				delete(remaining, datum.index)
+			}
+			head = head.Set("items", mm)
+
+		case event := <-newTop:
+			if event.Type == firego.EventTypeError {
+				panic(event.Data)
+			}
+
+			items := event.Data.([]interface{})
+			topItems = topItems[:len(items)]
+			for i, item := range items {
+				topItems[i] = types.Number(item.(float64))
+			}
+
+			head = head.Set("top", types.NewList(topItems...))
 		}
 
-		if !oldMap.Equals(mm) {
-			head = head.Set("items", mm)
+		if !oldHead.Equals(head) {
 			// Poke our new head into the chan. If an old one is still in there, nudge it out and add our new one.
 			select {
 			case newHead <- head:

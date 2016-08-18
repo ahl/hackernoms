@@ -79,11 +79,11 @@ func main() {
 		{"id", types.NumberType},
 		{"time", types.NumberType},
 
-		{"deleted", optionBool},
-		{"dead", optionBool},
-
 		{"text", optionString},
 		{"by", optionString},
+
+		{"deleted", optionBool},
+		{"dead", optionBool},
 
 		{"comments", types.MakeListType(types.MakeCycleType(0))},
 	})
@@ -92,20 +92,22 @@ func main() {
 		{"id", types.NumberType},
 		{"time", types.NumberType},
 
+		{"title", optionString},
+		{"url", optionString},
+		{"text", optionString},
+		{"by", optionString},
+
 		{"deleted", optionBool},
 		{"dead", optionBool},
 
 		{"descendants", optionNumber},
 		{"score", optionNumber},
 
-		{"text", optionString},
-		{"url", optionString},
-		{"by", optionString},
-
 		{"comments", types.MakeListType(commentType.t)},
 	})
 
-	mm := source.HeadValue().(types.Map)
+	head := source.HeadValue().(types.Struct)
+	allItems := head.Get("items").(types.Map)
 
 	start, ok := ds.MaybeHeadValue()
 	if !ok {
@@ -116,7 +118,7 @@ func main() {
 	newStory := make(chan types.Value, 100)
 
 	go func() {
-		mm.IterFrom(start, func(id, value types.Value) bool {
+		allItems.IterFrom(start, func(id, value types.Value) bool {
 			item := value.(types.Struct)
 
 			if item.Type().Desc.(types.StructDesc).Name == "story" {
@@ -143,14 +145,15 @@ func main() {
 				newStory <- NewStructWithType(storyType, types.ValueSlice{
 					id,
 					item.Get("time"),
+					OptionGet(item, "title"),
+					OptionGet(item, "url"),
+					OptionGet(item, "text"),
+					OptionGet(item, "by"),
 					OptionGet(item, "deleted"),
 					OptionGet(item, "dead"),
 					OptionGet(item, "descendants"),
 					OptionGet(item, "score"),
-					OptionGet(item, "text"),
-					OptionGet(item, "url"),
-					OptionGet(item, "by"),
-					comments(item, mm),
+					comments(item, allItems),
 				})
 			}
 		}()
@@ -180,14 +183,14 @@ func OptionGet(st types.Struct, field string) types.Value {
 	}
 }
 
-// |item| could be a story or a comment
-func comments(item types.Value, all types.Map) types.Value {
+// Process children; |item| may be a story or a comment.
+func comments(item types.Value, allItems types.Map) types.Value {
 	ret := types.NewList()
 
 	c, ok := item.(types.Struct).MaybeGet("kids")
 	if ok {
 		c.(types.List).IterAll(func(id types.Value, _ uint64) {
-			value, ok := all.MaybeGet(id)
+			value, ok := allItems.MaybeGet(id)
 			if !ok {
 				panic(fmt.Sprintf("unable to look up %d", int(id.(types.Number))))
 			}
@@ -203,11 +206,11 @@ func comments(item types.Value, all types.Map) types.Value {
 			comm := NewStructWithType(commentType, types.ValueSlice{
 				id,
 				subitem.Get("time"),
-				OptionGet(subitem, "deleted"),
-				OptionGet(subitem, "dead"),
 				OptionGet(subitem, "text"),
 				OptionGet(subitem, "by"),
-				comments(subitem, all),
+				OptionGet(subitem, "deleted"),
+				OptionGet(subitem, "dead"),
+				comments(subitem, allItems),
 			})
 			ret = ret.Append(comm)
 		})
