@@ -8,13 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
+	"runtime"
 	"sort"
+	"time"
 
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
 
-// Map<number, Struct Story {
+// Turn the items into threads:
+// Map<Number, Struct Story {
 //	id Number
 //	time Number
 //
@@ -34,6 +38,19 @@ import (
 //		comments List<Cycle<0>>
 //	}>
 // }>
+//
+// Turn the top stories into a list
+// List<Struct StorySummary {
+//	id Number
+//	title String
+//	url String
+//	score Number
+//	by String
+//	time Number
+//	descendants Number
+//
+//	story Ref<Struct Story { ... }>
+// }>
 
 var nothing types.Value
 var nothingType *types.Type
@@ -47,7 +64,7 @@ var commentType *StructType
 
 func main() {
 	flag.Usage = func() {
-		fmt.Printf("Usage: %s <src-dataset-spec> <dst-dataset-spec>\n", os.Args[0])
+		fmt.Printf("Usage: %s <src-dataset-spec> <dst-dataset-spec>\n", path.Base(os.Args[0]))
 	}
 	flag.Parse()
 	if flag.NArg() != 2 {
@@ -109,16 +126,21 @@ func main() {
 	head := source.HeadValue().(types.Struct)
 	allItems := head.Get("items").(types.Map)
 
-	start, ok := ds.MaybeHeadValue()
-	if !ok {
-		start = types.Number(1)
-	}
+	/*
+		start, ok := ds.MaybeHeadValue()
+		if !ok {
+			start = types.Number(1)
+		}
+	*/
 
 	newItem := make(chan types.Struct, 100)
 	newStory := make(chan types.Value, 100)
 
+	lastKey, _ := allItems.Last()
+	lastIndex := int(lastKey.(types.Number))
+
 	go func() {
-		allItems.IterFrom(start, func(id, value types.Value) bool {
+		allItems.Iter(func(id, value types.Value) bool {
 			item := value.(types.Struct)
 
 			if item.Type().Desc.(types.StructDesc).Name == "story" {
@@ -130,48 +152,99 @@ func main() {
 		close(newItem)
 	}()
 
-	for i := 0; i < 100; i += 1 {
-		go func() {
-			for item := range newItem {
-				id := item.Get("id")
-				fmt.Println(id)
+	workerPool(runtime.GOMAXPROCS(0), func() {
+		for item := range newItem {
+			id := item.Get("id")
 
-				// Known stubs with just id and type
-				if fields := item.ChildValues(); len(fields) == 2 {
-					item.Get("type") // or panic
-					continue
-				}
-
-				newStory <- NewStructWithType(storyType, types.ValueSlice{
-					id,
-					item.Get("time"),
-					OptionGet(item, "title"),
-					OptionGet(item, "url"),
-					OptionGet(item, "text"),
-					OptionGet(item, "by"),
-					OptionGet(item, "deleted"),
-					OptionGet(item, "dead"),
-					OptionGet(item, "descendants"),
-					OptionGet(item, "score"),
-					comments(item, allItems),
-				})
+			// Known stubs with just id and type
+			if fields := item.ChildValues(); len(fields) == 2 {
+				item.Get("type") // or panic
+				continue
 			}
-		}()
-	}
+
+			newStory <- NewStructWithType(storyType, types.ValueSlice{
+				id,
+				item.Get("time"),
+				OptionGet(item, "title"),
+				OptionGet(item, "url"),
+				OptionGet(item, "text"),
+				OptionGet(item, "by"),
+				OptionGet(item, "deleted"),
+				OptionGet(item, "dead"),
+				OptionGet(item, "descendants"),
+				OptionGet(item, "score"),
+				comments(item, allItems),
+			})
+		}
+	}, func() {
+		close(newStory)
+	})
+
+	streamData := make(chan types.Value, 100)
+	newMap := types.NewStreamingMap(ds.Database(), streamData)
+
+	start := time.Now()
+	count := 0
 
 	for story := range newStory {
 		id := story.(types.Struct).Get("id")
-		//fmt.Println(types.EncodedIndexValue(id))
-		fmt.Println(types.EncodedIndexValue(story))
 
-		nds, err := ds.CommitValue(id)
-		if err != nil {
-			panic(err)
+		count++
+		if count%1000 == 0 {
+			dur := time.Since(start)
+			eta := time.Duration(float64(dur) * float64(lastIndex-count) / float64(count))
+			fmt.Printf("%d/%d %s\n", int(id.(types.Number)), lastIndex, eta)
 		}
-		ds = nds
+
+		streamData <- id
+		streamData <- story
+	}
+	close(streamData)
+
+	fmt.Println("stream completed")
+
+	stories := <-newMap
+
+	fmt.Println("map created")
+
+	topStories := head.Get("top").(types.List)
+
+	streamData = make(chan types.Value, 100)
+	newList := types.NewStreamingList(ds.Database(), streamData)
+
+	topStories.IterAll(func(item types.Value, _ uint64) {
+		id := item.(types.Number)
+		story := stories.Get(id).(types.Struct)
+
+		types.NewStruct("StorySummary", types.StructData{
+			"id":          id,
+			"title":       SomeOf(story.Get("title")),
+			"url":         SomeOf(story.Get("url")),
+			"score":       SomeOf(story.Get("score")),
+			"by":          SomeOf(story.Get("by")),
+			"time":        story.Get("time"),
+			"descendants": SomeOf(story.Get("descendants")),
+			"story":       types.NewRef(story),
+		})
+	})
+	close(streamData)
+
+	fmt.Println("stream completed")
+
+	top := <-newList
+
+	fmt.Println("list created")
+
+	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
+		"stories": stories,
+		"top":     top,
+		"head":    types.NewRef(head),
+	}))
+	if err != nil {
+		panic(err)
 	}
 
-	fmt.Println("done")
+	fmt.Println("done!")
 }
 
 func OptionGet(st types.Struct, field string) types.Value {
@@ -181,6 +254,13 @@ func OptionGet(st types.Struct, field string) types.Value {
 	} else {
 		return nothing
 	}
+}
+
+func SomeOf(v types.Value) types.Value {
+	if v.Type() == nothingType {
+		panic("nothing!")
+	}
+	return v
 }
 
 // Process children; |item| may be a story or a comment.
@@ -270,4 +350,22 @@ func NewStructWithType(t *StructType, values types.ValueSlice) types.Value {
 	}
 
 	return types.NewStructWithType(t.t, v)
+}
+
+func workerPool(count int, work func(), done func()) {
+	workerDone := make(chan bool, 1)
+	for i := 0; i < count; i += 1 {
+		go func() {
+			work()
+			workerDone <- true
+		}()
+	}
+
+	go func() {
+		for i := 0; i < count; i += 1 {
+			_ = <-workerDone
+		}
+		close(workerDone)
+		done()
+	}()
 }
