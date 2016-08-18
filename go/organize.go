@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"runtime"
 	"sort"
 	"time"
 
@@ -43,7 +42,7 @@ import (
 // List<Struct StorySummary {
 //	id Number
 //	title String
-//	url String
+//	url String | Nothing
 //	score Number
 //	by String
 //	time Number
@@ -143,7 +142,9 @@ func main() {
 		allItems.Iter(func(id, value types.Value) bool {
 			item := value.(types.Struct)
 
-			if item.Type().Desc.(types.StructDesc).Name == "story" {
+			// Note that we're explicitly excluding items of type "job" and "poll" which may also be found in the list of top items.
+			switch item.Type().Desc.(types.StructDesc).Name {
+			case "story":
 				newItem <- item
 			}
 
@@ -152,7 +153,7 @@ func main() {
 		close(newItem)
 	}()
 
-	workerPool(runtime.GOMAXPROCS(0), func() {
+	workerPool(50, func() {
 		for item := range newItem {
 			id := item.Get("id")
 
@@ -192,7 +193,7 @@ func main() {
 		count++
 		if count%1000 == 0 {
 			dur := time.Since(start)
-			eta := time.Duration(float64(dur) * float64(lastIndex-count) / float64(count))
+			eta := dur * time.Duration(float64(lastIndex-count)/float64(count))
 			fmt.Printf("%d/%d %s\n", int(id.(types.Number)), lastIndex, eta)
 		}
 
@@ -214,17 +215,23 @@ func main() {
 
 	topStories.IterAll(func(item types.Value, _ uint64) {
 		id := item.(types.Number)
-		story := stories.Get(id).(types.Struct)
+		v, ok := stories.MaybeGet(id)
+		if !ok {
+			fmt.Printf("%d in top stories, but not in map\n", int(id))
+			return
+		}
 
-		types.NewStruct("StorySummary", types.StructData{
+		story := v.(types.Struct)
+
+		streamData <- types.NewStruct("StorySummary", types.StructData{
 			"id":          id,
 			"title":       SomeOf(story.Get("title")),
-			"url":         SomeOf(story.Get("url")),
+			"url":         SomeOr(story.Get("url"), types.String("")), // The empty string denotes no URL.
 			"score":       SomeOf(story.Get("score")),
 			"by":          SomeOf(story.Get("by")),
-			"time":        story.Get("time"),
+			"time":        story.Get("time"), // This will never be Nothing.
 			"descendants": SomeOf(story.Get("descendants")),
-			"story":       types.NewRef(story),
+			"story":       ds.Database().WriteValue(story),
 		})
 	})
 	close(streamData)
@@ -238,7 +245,7 @@ func main() {
 	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
 		"stories": stories,
 		"top":     top,
-		"head":    types.NewRef(head),
+		"head":    types.String(head.Hash().String()),
 	}))
 	if err != nil {
 		panic(err)
@@ -259,6 +266,13 @@ func OptionGet(st types.Struct, field string) types.Value {
 func SomeOf(v types.Value) types.Value {
 	if v.Type() == nothingType {
 		panic("nothing!")
+	}
+	return v
+}
+
+func SomeOr(v types.Value, def types.Value) types.Value {
+	if v.Type() == nothingType {
+		return def
 	}
 	return v
 }
