@@ -246,7 +246,7 @@ func main() {
 	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
 		"stories": stories,
 		"top":     top,
-		"head":    types.String(head.Hash().String()),
+		"head":    types.String(source.Head().Hash()),
 	}))
 	if err != nil {
 		panic(err)
