@@ -124,6 +124,7 @@ func main() {
 
 	head := source.HeadValue().(types.Struct)
 	allItems := head.Get("items").(types.Map)
+	topStories := head.Get("top").(types.List)
 
 	/*
 		start, ok := ds.MaybeHeadValue()
@@ -139,7 +140,9 @@ func main() {
 	lastIndex := int(lastKey.(types.Number))
 
 	go func() {
-		allItems.Iter(func(id, value types.Value) bool {
+		//allItems.Iter(func(id, value types.Value) bool {
+		topStories.Iter(func(index types.Value, _ uint64) bool {
+			value := allItems.Get(index)
 			item := value.(types.Struct)
 
 			// Note that we're explicitly excluding items of type "job" and "poll" which may also be found in the list of top items.
@@ -209,8 +212,6 @@ func main() {
 
 	fmt.Println("map created")
 
-	topStories := head.Get("top").(types.List)
-
 	streamData = make(chan types.Value, 100)
 	newList := types.NewStreamingList(ds.Database(), streamData)
 
@@ -246,7 +247,7 @@ func main() {
 	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
 		"stories": stories,
 		"top":     top,
-		"head":    types.String(source.Head().Hash()),
+		"head":    types.String(source.Head().Hash().String()),
 	}))
 	if err != nil {
 		panic(err)
