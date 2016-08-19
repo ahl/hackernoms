@@ -192,9 +192,10 @@ func main() {
 
 		count++
 		if count%1000 == 0 {
+			n := int(id.(types.Number))
 			dur := time.Since(start)
-			eta := dur * time.Duration(float64(lastIndex-count)/float64(count))
-			fmt.Printf("%d/%d %s\n", int(id.(types.Number)), lastIndex, eta)
+			eta := dur * time.Duration(float64(lastIndex-n)/float64(n))
+			fmt.Printf("%d/%d %s\n", n, lastIndex, eta)
 		}
 
 		streamData <- id
