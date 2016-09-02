@@ -16,6 +16,7 @@ import (
 
 	"github.com/zabawaba99/firego"
 
+	"github.com/attic-labs/noms/go/dataset"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
@@ -25,7 +26,7 @@ const HNWINDOW = 14 * 24 * 60 * 60 // 2 weeks is the hacker news limit for editi
 
 type datum struct {
 	index float64
-	value types.Value
+	value types.Struct
 }
 
 func main() {
@@ -33,9 +34,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <dst>\n", path.Base(os.Args[0]))
 	}
 
-	var start int
+	var start int64
 
-	flag.IntVar(&start, "s", -1, "start time in seconds since the epoch")
+	flag.Int64Var(&start, "s", -1, "start time in seconds since the epoch")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -44,25 +45,119 @@ func main() {
 
 	ds, err := spec.GetDataset(flag.Arg(0))
 	if err != nil {
-		fmt.Printf("Could not parse dst-dataset: %s\n", err)
+		fmt.Printf("Could not parse destination dataset: %s\n", err)
 		return
 	}
 	defer ds.Database().Close()
 
-	// Grab the root struct; convert from the old format if needed.
-	var head types.Struct
-	hv := ds.HeadValue()
+	hv, ok := ds.MaybeHeadValue()
 
-	switch h := hv.(type) {
-	case types.Map:
-		head = types.NewStruct("HackerNoms", types.StructData{
-			"items": h,
-			"top":   types.NewList(types.Number(0)),
-		})
-	case types.Struct:
-		head = h
+	if !ok {
+		if start != -1 {
+			fmt.Fprint(os.Stderr, "-s is invalid for a new dataset")
+			return
+		}
+
+		start = time.Now().Unix() - HNWINDOW
+
+		// Our first sync really just needs to get all the read-only data, therefore we don't need to worry about updates. We'll get potentially changed data later.
+		hv = bigSync(ds)
+		nds, err := ds.CommitValue(hv)
+		if err != nil {
+			panic(err)
+		}
+		ds = nds
 	}
 
+	update := firego.New("https://hacker-news.firebaseio.com/v0/updates", nil)
+	newUpdate := make(chan firego.Event, 1000)
+	if err := update.Watch(newUpdate); err != nil {
+		panic(err)
+	}
+
+	newHead := make(chan types.Struct, 1) // This must be size 1 because we poke items out
+
+	go func() {
+		oldHead := ds.HeadValue()
+		for {
+			head := <-newHead
+			if !head.Equals(oldHead) {
+				fmt.Println("committing")
+				nds, err := ds.CommitValue(head)
+				if err != nil {
+					panic(err)
+				}
+				ds = nds
+				oldHead = head
+				fmt.Println("commit complete")
+			} else {
+				fmt.Println("no change")
+			}
+		}
+	}()
+
+	head := hv.(types.Struct)
+	catchUp(head, start, newHead, newUpdate)
+	keepUp(head, newHead, newUpdate)
+}
+
+func bigSync(ds dataset.Dataset) types.Value {
+	max := firego.New("https://hacker-news.firebaseio.com/v0/maxitem", nil)
+	var maxItem float64
+	if err := max.Value(&maxItem); err != nil {
+		panic(err)
+	}
+
+	newIndex := make(chan float64, 1000)
+	newDatum := make(chan datum, 100)
+	streamData := make(chan types.Value, 100)
+	newMap := types.NewStreamingMap(ds.Database(), streamData)
+
+	go func() {
+		for i := 12410000.0; i < maxItem; i++ {
+			newIndex <- i
+		}
+
+		close(newIndex)
+	}()
+
+	workerPool(500, func() {
+		churn(newIndex, newDatum)
+	}, func() {
+		close(newDatum)
+	})
+
+	start := time.Now()
+	count := 0
+
+	for datum := range newDatum {
+		count++
+		if count%10000 == 0 {
+			dur := time.Since(start)
+			dur -= dur % time.Second
+			eta := time.Duration(float64(dur) * (maxItem - float64(count)) / float64(count))
+			eta -= eta % time.Second
+			fmt.Printf("sent: %d/%d  elapsed: %s  eta: %s\n", count, int(maxItem), dur, eta)
+		}
+
+		streamData <- types.Number(datum.index)
+		streamData <- datum.value
+	}
+
+	close(streamData)
+
+	fmt.Println("generating map...")
+
+	mm := <-newMap
+
+	return types.NewStruct("HackerNoms", types.StructData{
+		"items": mm,
+		"top":   types.NewList(types.Number(0)),
+	})
+
+}
+
+func catchUp(head types.Struct, start int64, newHead chan types.Struct, newUpdate <-chan firego.Event) {
 	mm := head.Get("items").(types.Map)
 
 	if start == -1 {
@@ -89,7 +184,7 @@ func main() {
 			}
 		}
 
-		start = int(time.(types.Number)) - HNWINDOW
+		start = int64(time.(types.Number)) - HNWINDOW
 	}
 
 	// Find the starting key.
@@ -97,13 +192,6 @@ func main() {
 	tt := startVal.(types.Struct).Get("time").(types.Number)
 	fmt.Println(types.EncodedIndexValue(startVal))
 	fmt.Printf("posted %s ago\n", time.Since(time.Unix(int64(tt), 0)))
-
-	// Process from startKey to maxItem to get caught up. We update maxItem based on items that we see in updates.
-	update := firego.New("https://hacker-news.firebaseio.com/v0/updates", nil)
-	newUpdate := make(chan firego.Event, 1000)
-	if err := update.Watch(newUpdate); err != nil {
-		panic(err)
-	}
 
 	max := firego.New("https://hacker-news.firebaseio.com/v0/maxitem", nil)
 	var maxItem float64
@@ -118,6 +206,7 @@ func main() {
 		363, // Please tell us what features you'd like in news.ycombinator
 	}
 
+	// Process from startKey to maxItem to get caught up. We update maxItem based on items that we see in updates.
 	go func() {
 		for _, index := range specialIndices {
 			newIndex <- index
@@ -164,33 +253,14 @@ func main() {
 
 	fmt.Println("caught up")
 
-	newHead := make(chan types.Struct, 1) // This must be size 1
-
-	go func() {
-		oldHead := ds.HeadValue()
-		for {
-			head := <-newHead
-			if !head.Equals(oldHead) {
-				fmt.Println("committing")
-				nds, err := ds.CommitValue(head)
-				if err != nil {
-					panic(err)
-				}
-				ds = nds
-				oldHead = head
-				fmt.Println("commit complete")
-			} else {
-				fmt.Println("no change")
-			}
-		}
-	}()
-
 	head = head.Set("items", mm)
 	newHead <- head
+}
 
-	// Enter the steady state now that we're caught up
-	newIndex = make(chan float64, 1)
-	newDatum = make(chan datum, 100)
+// Steady state, keeping up with ongoing updates.
+func keepUp(head types.Struct, newHead chan types.Struct, newUpdate <-chan firego.Event) {
+	newIndex := make(chan float64, 1)
+	newDatum := make(chan datum, 100)
 
 	workerPool(1, func() {
 		churn(newIndex, newDatum)
@@ -205,6 +275,7 @@ func main() {
 		panic(err)
 	}
 
+	// Wait for either a batch of updated items or for a new list of top items. For updated items, fire them off to be processed, wait for the results, and post the update. For top items we can just post the update.
 	remaining := make(map[float64]bool)
 	topItems := make([]types.Value, 0, 500)
 	for {
@@ -217,9 +288,16 @@ func main() {
 
 			items := event.Data.(map[string]interface{})["items"].([]interface{})
 			for _, item := range items {
-				newIndex <- item.(float64)
 				remaining[item.(float64)] = true
 			}
+
+			go func() {
+				for idx, _ := range remaining {
+					newIndex <- idx
+				}
+			}()
+
+			mm := head.Get("items").(types.Map)
 
 			fmt.Println("batch")
 			for len(remaining) != 0 {
@@ -299,7 +377,7 @@ func mapFindFromKey(mm types.Map, value int) (types.Value, types.Value) {
 	panic("nothing found")
 }
 
-func mapFindKeyBefore(mm types.Map, time int) (types.Number, types.Value) {
+func mapFindKeyBefore(mm types.Map, time int64) (types.Number, types.Value) {
 	minKey, _ := mm.First()
 	maxKey, _ := mm.Last()
 
@@ -314,7 +392,7 @@ func mapFindKeyBefore(mm types.Map, time int) (types.Number, types.Value) {
 
 		midTime := midVal.(types.Struct).Get("time").(types.Number)
 
-		if time < int(midTime) {
+		if time < int64(midTime) {
 			maxKey = midKey
 		} else {
 			minKey = midKey
@@ -371,7 +449,9 @@ func churn(newIndex <-chan float64, newData chan<- datum) {
 			var val map[string]interface{}
 			err := fb.Value(&val)
 			if err != nil {
-				fmt.Printf("failed for %d (%d times) %s\n", id, attempts, err)
+				if attempts > 0 {
+					fmt.Printf("failed for %d (%d times) %s\n", id, attempts, err)
+				}
 				continue
 			}
 
