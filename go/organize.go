@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/attic-labs/noms/go/dataset"
+	"github.com/attic-labs/noms/go/hash"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
@@ -65,7 +66,7 @@ var storyType *StructType
 
 func main() {
 	flag.Usage = func() {
-		fmt.Printf("Usage: %s <src-dataset-spec> <dst-dataset-spec>\n", path.Base(os.Args[0]))
+		fmt.Printf("Usage: %s <src> <dst>\n", path.Base(os.Args[0]))
 	}
 	flag.Parse()
 	if flag.NArg() != 2 {
@@ -73,22 +74,24 @@ func main() {
 		return
 	}
 
+	// Just make sure that the source is valid
 	source, err := spec.GetDataset(os.Args[1])
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("invalid source dataset: %s\n", os.Args[1])
+		fmt.Printf("%s\n", err)
 		return
 	}
-	defer source.Database().Close()
+	source.Database().Close()
 
 	ds, err := spec.GetDataset(os.Args[2])
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("invalid destination dataset: %s\n", os.Args[2])
+		fmt.Printf("%s\n", err)
 		return
 	}
 	defer ds.Database().Close()
 
-	fmt.Println("starting")
-
+	// Create our types.
 	optionString := types.MakeUnionType(types.StringType, nothingType)
 	optionNumber := types.MakeUnionType(types.NumberType, nothingType)
 	optionBool := types.MakeUnionType(types.BoolType, nothingType)
@@ -124,16 +127,55 @@ func main() {
 		{"comments", types.MakeListType(commentType.t)},
 	})
 
+	hv, ok := ds.MaybeHeadValue()
+	if !ok {
+		fmt.Println("doing the initial sync...")
+		ds = bigSync(ds)
+		hv = ds.HeadValue()
+	}
+
+	dstHead := hv.(types.Struct)
+
+	for {
+		ns, err := spec.GetDataset(os.Args[1])
+		if err != nil {
+			panic(err)
+		}
+
+		dstHead = ds.HeadValue().(types.Struct)
+
+		oldHeadHash := hash.Parse(string(dstHead.Get("head").(types.String)))
+		oldHead := ns.Database().ReadValue(oldHeadHash).(types.Struct).Get("value").(types.Struct)
+		currentHead := ns.HeadValue().(types.Struct)
+
+		if oldHead.Equals(currentHead) {
+			fmt.Println("no changes")
+		} else {
+			dstHead = update(ds, oldHead, currentHead, dstHead)
+			dstHead = dstHead.Set("head", types.String(ns.Head().Hash().String()))
+
+			ds, err = ds.CommitValue(dstHead)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		ns.Database().Close()
+
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func bigSync(ds dataset.Dataset) dataset.Dataset {
+	source, err := spec.GetDataset(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	defer source.Database().Close()
+
 	head := source.HeadValue().(types.Struct)
 	allItems := head.Get("items").(types.Map)
 	topStories := head.Get("top").(types.List)
-
-	/*
-		start, ok := ds.MaybeHeadValue()
-		if !ok {
-			start = types.Number(1)
-		}
-	*/
 
 	newItem := make(chan types.Struct, 100)
 	newStory := make(chan types.Value, 100)
@@ -142,9 +184,9 @@ func main() {
 	lastIndex := int(lastKey.(types.Number))
 
 	go func() {
-		//allItems.Iter(func(id, value types.Value) bool {
-		topStories.Iter(func(index types.Value, _ uint64) bool {
-			value := allItems.Get(index)
+		//topStories.Iter(func(index types.Value, _ uint64) bool {
+		allItems.Iter(func(id, value types.Value) bool {
+			//value := allItems.Get(index)
 			item := value.(types.Struct)
 
 			// Note that we're explicitly excluding items of type "job" and "poll" which may also be found in the list of top items.
@@ -158,31 +200,7 @@ func main() {
 		close(newItem)
 	}()
 
-	workerPool(50, func() {
-		for item := range newItem {
-			id := item.Get("id")
-
-			// Known stubs with just id and type
-			if fields := item.ChildValues(); len(fields) == 2 {
-				item.Get("type") // or panic
-				continue
-			}
-
-			newStory <- NewStructWithType(storyType, types.ValueSlice{
-				id,
-				item.Get("time"),
-				OptionGet(item, "title"),
-				OptionGet(item, "url"),
-				OptionGet(item, "text"),
-				OptionGet(item, "by"),
-				OptionGet(item, "deleted"),
-				OptionGet(item, "dead"),
-				OptionGet(item, "descendants"),
-				OptionGet(item, "score"),
-				comments(item, allItems),
-			})
-		}
-	}, func() {
+	workerPool(50, makeStories(allItems, newItem, newStory), func() {
 		close(newStory)
 	})
 
@@ -225,33 +243,35 @@ func main() {
 		panic(err)
 	}
 
-	oldHead := head
+	return ds
+}
 
-	for {
-		time.Sleep(1 * time.Second)
+func makeStories(allItems types.Map, newItem <-chan types.Struct, newStory chan<- types.Value) func() {
+	return func() {
+		for item := range newItem {
+			id := item.Get("id")
+			fmt.Printf("working on story %d\n", int(id.(types.Number)))
 
-		ns, err := spec.GetDataset(os.Args[1])
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		currentHead := ns.HeadValue().(types.Struct)
-
-		if oldHead.Equals(currentHead) {
-			fmt.Println("no changes")
-		} else {
-			nh := update(ds, oldHead, currentHead, ds.HeadValue().(types.Struct))
-
-			ds, err = ds.CommitValue(nh)
-			if err != nil {
-				panic(err)
+			// Known stubs with just id and type
+			if fields := item.ChildValues(); len(fields) == 2 {
+				item.Get("type") // or panic
+				continue
 			}
 
-			oldHead = currentHead
+			newStory <- NewStructWithType(storyType, types.ValueSlice{
+				id,
+				item.Get("time"),
+				OptionGet(item, "title"),
+				OptionGet(item, "url"),
+				OptionGet(item, "text"),
+				OptionGet(item, "by"),
+				OptionGet(item, "deleted"),
+				OptionGet(item, "dead"),
+				OptionGet(item, "descendants"),
+				OptionGet(item, "score"),
+				comments(item, allItems),
+			})
 		}
-
-		ns.Database().Close()
 	}
 }
 
@@ -411,33 +431,28 @@ func update(ds dataset.Dataset, old types.Value, new types.Value, dest types.Str
 		}
 	}
 
+	newItem := make(chan types.Struct, 10)
+	newStory := make(chan types.Value, 10)
+
+	go func() {
+		for _, item := range stories {
+			newItem <- item
+		}
+		close(newItem)
+	}()
+
+	workerPool(10, makeStories(newItems, newItem, newStory), func() {
+		close(newStory)
+	})
+
 	destStories := dest.Get("stories").(types.Map)
-
-	for id, item := range stories {
-		fmt.Printf("changed story %d\n", int(id))
-		story := NewStructWithType(storyType, types.ValueSlice{
-			id,
-			item.Get("time"),
-			OptionGet(item, "title"),
-			OptionGet(item, "url"),
-			OptionGet(item, "text"),
-			OptionGet(item, "by"),
-			OptionGet(item, "deleted"),
-			OptionGet(item, "dead"),
-			OptionGet(item, "descendants"),
-			OptionGet(item, "score"),
-			comments(item, newItems),
-		})
-
+	for story := range newStory {
+		id := story.(types.Struct).Get("id")
 		destStories = destStories.Set(id, story)
 	}
 
 	dest = dest.Set("stories", destStories)
-
-	// XXX process the top stories
-	top := topList(ds, newTop, destStories)
-
-	dest = dest.Set("top", top)
+	dest = dest.Set("top", topList(ds, newTop, destStories))
 
 	return dest
 }
