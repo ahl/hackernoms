@@ -492,10 +492,14 @@ func sendDatum(newData chan<- datum, name string, id float64, data map[string]ty
 		value: st,
 	}
 
-	select {
-	case newData <- d:
-	default:
-		fmt.Println("blocked")
-		newData <- d
-	}
+	newData <- d
+
+	/*
+		select {
+		case newData <- d:
+		default:
+			fmt.Println("blocked")
+			newData <- d
+		}
+	*/
 }
