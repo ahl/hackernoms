@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/attic-labs/noms/go/dataset"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
@@ -60,6 +61,7 @@ func init() {
 }
 
 var commentType *StructType
+var storyType *StructType
 
 func main() {
 	flag.Usage = func() {
@@ -104,7 +106,7 @@ func main() {
 		{"comments", types.MakeListType(types.MakeCycleType(0))},
 	})
 
-	storyType := MakeStructType("Story", []FieldType{
+	storyType = MakeStructType("Story", []FieldType{
 		{"id", types.NumberType},
 		{"time", types.NumberType},
 
@@ -197,7 +199,7 @@ func main() {
 		if count%1000 == 0 {
 			n := int(id.(types.Number))
 			dur := time.Since(start)
-			eta := dur * time.Duration(float64(lastIndex-n)/float64(n))
+			eta := time.Duration(float64(dur) * float64(lastIndex-n) / float64(n))
 			fmt.Printf("%d/%d %s\n", n, lastIndex, eta)
 		}
 
@@ -212,37 +214,7 @@ func main() {
 
 	fmt.Println("map created")
 
-	streamData = make(chan types.Value, 100)
-	newList := types.NewStreamingList(ds.Database(), streamData)
-
-	topStories.IterAll(func(item types.Value, _ uint64) {
-		id := item.(types.Number)
-		v, ok := stories.MaybeGet(id)
-		if !ok {
-			fmt.Printf("%d in top stories, but not in map\n", int(id))
-			return
-		}
-
-		story := v.(types.Struct)
-
-		streamData <- types.NewStruct("StorySummary", types.StructData{
-			"id":          id,
-			"title":       SomeOf(story.Get("title")),
-			"url":         SomeOr(story.Get("url"), types.String("")), // The empty string denotes no URL.
-			"score":       SomeOf(story.Get("score")),
-			"by":          SomeOf(story.Get("by")),
-			"time":        story.Get("time"), // This will never be Nothing.
-			"descendants": SomeOf(story.Get("descendants")),
-			"story":       ds.Database().WriteValue(story),
-		})
-	})
-	close(streamData)
-
-	fmt.Println("stream completed")
-
-	top := <-newList
-
-	fmt.Println("list created")
+	top := topList(ds, topStories, stories)
 
 	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
 		"stories": stories,
@@ -253,7 +225,34 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Println("done!")
+	oldHead := head
+
+	for {
+		time.Sleep(1 * time.Second)
+
+		ns, err := spec.GetDataset(os.Args[1])
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		currentHead := ns.HeadValue().(types.Struct)
+
+		if oldHead.Equals(currentHead) {
+			fmt.Println("no changes")
+		} else {
+			nh := update(ds, oldHead, currentHead, ds.HeadValue().(types.Struct))
+
+			ds, err = ds.CommitValue(nh)
+			if err != nil {
+				panic(err)
+			}
+
+			oldHead = currentHead
+		}
+
+		ns.Database().Close()
+	}
 }
 
 func OptionGet(st types.Struct, field string) types.Value {
@@ -288,7 +287,9 @@ func comments(item types.Value, allItems types.Map) types.Value {
 		c.(types.List).IterAll(func(id types.Value, _ uint64) {
 			value, ok := allItems.MaybeGet(id)
 			if !ok {
-				panic(fmt.Sprintf("unable to look up %d", int(id.(types.Number))))
+				fmt.Printf("unable to look up %d from %d\n", int(id.(types.Number)), int(item.(types.Struct).Get("id").(types.Number)))
+				//panic(fmt.Sprintf("unable to look up %d from %d", int(id.(types.Number)), int(item.(types.Struct).Get("id").(types.Number))))
+				return
 			}
 
 			subitem := value.(types.Struct)
@@ -313,6 +314,132 @@ func comments(item types.Value, allItems types.Map) types.Value {
 	}
 
 	return ret
+}
+
+func topList(ds dataset.Dataset, srcTop types.List, dstStories types.Map) types.List {
+	streamData := make(chan types.Value, 100)
+	newList := types.NewStreamingList(ds.Database(), streamData)
+
+	srcTop.IterAll(func(item types.Value, _ uint64) {
+		id := item.(types.Number)
+		v, ok := dstStories.MaybeGet(id)
+		if !ok {
+			fmt.Printf("%d in top stories, but not in map\n", int(id))
+			return
+		}
+
+		story := v.(types.Struct)
+
+		streamData <- types.NewStruct("StorySummary", types.StructData{
+			"id":          id,
+			"title":       SomeOf(story.Get("title")),
+			"url":         SomeOr(story.Get("url"), types.String("")), // The empty string denotes no URL.
+			"score":       SomeOf(story.Get("score")),
+			"by":          SomeOf(story.Get("by")),
+			"time":        story.Get("time"), // This will never be Nothing.
+			"descendants": SomeOf(story.Get("descendants")),
+			"story":       ds.Database().WriteValue(story),
+		})
+	})
+	close(streamData)
+
+	fmt.Println("stream completed")
+
+	top := <-newList
+
+	fmt.Println("list created")
+
+	return top
+}
+
+func update(ds dataset.Dataset, old types.Value, new types.Value, dest types.Struct) types.Struct {
+	// 1. Diff old and new
+	// 2. For each changed id, find the changed story
+	// 3. For each changed story reprocess and update the map
+
+	oldHead := old.(types.Struct)
+	oldItems := oldHead.Get("items").(types.Map)
+
+	newHead := new.(types.Struct)
+	newItems := newHead.Get("items").(types.Map)
+	newTop := newHead.Get("top").(types.List)
+
+	changes := make(chan types.ValueChanged, 5)
+	stop := make(chan struct{}, 1)
+
+	go func() {
+		newItems.Diff(oldItems, changes, stop)
+		close(changes)
+	}()
+
+	items := make(map[types.Number]bool)
+	stories := make(map[types.Number]types.Struct)
+
+	for change := range changes {
+
+		id := change.V.(types.Number)
+
+		switch change.ChangeType {
+		case types.DiffChangeAdded:
+			fmt.Printf("added item %d\n", int(id))
+		case types.DiffChangeModified:
+			fmt.Printf("modified item %d\n", int(id))
+		case types.DiffChangeRemoved:
+			panic(fmt.Sprintf("unexpected remove of %d", int(change.V.(types.Number))))
+		default:
+			panic(fmt.Sprintf("unexpected change type for %d", int(change.V.(types.Number))))
+		}
+
+		for {
+			if items[id] {
+				break
+			}
+
+			items[id] = true
+
+			item := newItems.Get(id).(types.Struct)
+			if item.Type().Desc.(types.StructDesc).Name == "story" {
+				stories[id] = item
+				break
+			}
+
+			pid, ok := item.MaybeGet("parent")
+			if !ok {
+				break
+			}
+			id = pid.(types.Number)
+		}
+	}
+
+	destStories := dest.Get("stories").(types.Map)
+
+	for id, item := range stories {
+		fmt.Printf("changed story %d\n", int(id))
+		story := NewStructWithType(storyType, types.ValueSlice{
+			id,
+			item.Get("time"),
+			OptionGet(item, "title"),
+			OptionGet(item, "url"),
+			OptionGet(item, "text"),
+			OptionGet(item, "by"),
+			OptionGet(item, "deleted"),
+			OptionGet(item, "dead"),
+			OptionGet(item, "descendants"),
+			OptionGet(item, "score"),
+			comments(item, newItems),
+		})
+
+		destStories = destStories.Set(id, story)
+	}
+
+	dest = dest.Set("stories", destStories)
+
+	// XXX process the top stories
+	top := topList(ds, newTop, destStories)
+
+	dest = dest.Set("top", top)
+
+	return dest
 }
 
 type StructType struct {

@@ -97,67 +97,6 @@ func main() {
 	}()
 
 	head := hv.(types.Struct)
-	catchUp(head, start, newHead, newUpdate)
-	keepUp(head, newHead, newUpdate)
-}
-
-func bigSync(ds dataset.Dataset) types.Value {
-	max := firego.New("https://hacker-news.firebaseio.com/v0/maxitem", nil)
-	var maxItem float64
-	if err := max.Value(&maxItem); err != nil {
-		panic(err)
-	}
-
-	newIndex := make(chan float64, 1000)
-	newDatum := make(chan datum, 100)
-	streamData := make(chan types.Value, 100)
-	newMap := types.NewStreamingMap(ds.Database(), streamData)
-
-	go func() {
-		for i := 1.0; i < maxItem; i++ {
-			newIndex <- i
-		}
-
-		close(newIndex)
-	}()
-
-	workerPool(500, func() {
-		churn(newIndex, newDatum)
-	}, func() {
-		close(newDatum)
-	})
-
-	start := time.Now()
-	count := 0
-
-	for datum := range newDatum {
-		count++
-		if count%10000 == 0 {
-			dur := time.Since(start)
-			dur -= dur % time.Second
-			eta := time.Duration(float64(dur) * (maxItem - float64(count)) / float64(count))
-			eta -= eta % time.Second
-			fmt.Printf("sent: %d/%d  elapsed: %s  eta: %s\n", count, int(maxItem), dur, eta)
-		}
-
-		streamData <- types.Number(datum.index)
-		streamData <- datum.value
-	}
-
-	close(streamData)
-
-	fmt.Println("generating map...")
-
-	mm := <-newMap
-
-	return types.NewStruct("HackerNoms", types.StructData{
-		"items": mm,
-		"top":   types.NewList(types.Number(0)),
-	})
-
-}
-
-func catchUp(head types.Struct, start int64, newHead chan types.Struct, newUpdate <-chan firego.Event) {
 	mm := head.Get("items").(types.Map)
 
 	if start == -1 {
@@ -167,7 +106,7 @@ func catchUp(head types.Struct, start int64, newHead chan types.Struct, newUpdat
 		var time types.Value
 		var ok bool
 
-		for i := 0; true; i += 1 {
+		for i := 0; true; i++ {
 			time, ok = value.(types.Struct).MaybeGet("time")
 			if ok {
 				break
@@ -255,12 +194,10 @@ func catchUp(head types.Struct, start int64, newHead chan types.Struct, newUpdat
 
 	head = head.Set("items", mm)
 	newHead <- head
-}
 
-// Steady state, keeping up with ongoing updates.
-func keepUp(head types.Struct, newHead chan types.Struct, newUpdate <-chan firego.Event) {
-	newIndex := make(chan float64, 1)
-	newDatum := make(chan datum, 100)
+	// Enter the steady state where we keep up with ongoing updates.
+	newIndex = make(chan float64, 1)
+	newDatum = make(chan datum, 100)
 
 	workerPool(1, func() {
 		churn(newIndex, newDatum)
@@ -341,6 +278,62 @@ func keepUp(head types.Struct, newHead chan types.Struct, newUpdate <-chan fireg
 			}
 		}
 	}
+}
+
+func bigSync(ds dataset.Dataset) types.Value {
+	max := firego.New("https://hacker-news.firebaseio.com/v0/maxitem", nil)
+	var maxItem float64
+	if err := max.Value(&maxItem); err != nil {
+		panic(err)
+	}
+
+	newIndex := make(chan float64, 1000)
+	newDatum := make(chan datum, 100)
+	streamData := make(chan types.Value, 100)
+	newMap := types.NewStreamingMap(ds.Database(), streamData)
+
+	go func() {
+		for i := 1.0; i < maxItem; i++ {
+			newIndex <- i
+		}
+
+		close(newIndex)
+	}()
+
+	workerPool(500, func() {
+		churn(newIndex, newDatum)
+	}, func() {
+		close(newDatum)
+	})
+
+	start := time.Now()
+	count := 0
+
+	for datum := range newDatum {
+		count++
+		if count%10000 == 0 {
+			dur := time.Since(start)
+			dur -= dur % time.Second
+			eta := time.Duration(float64(dur) * (maxItem - float64(count)) / float64(count))
+			eta -= eta % time.Second
+			fmt.Printf("sent: %d/%d  elapsed: %s  eta: %s\n", count, int(maxItem), dur, eta)
+		}
+
+		streamData <- types.Number(datum.index)
+		streamData <- datum.value
+	}
+
+	close(streamData)
+
+	fmt.Println("generating map...")
+
+	mm := <-newMap
+
+	return types.NewStruct("HackerNoms", types.StructData{
+		"items": mm,
+		"top":   types.NewList(types.Number(0)),
+	})
+
 }
 
 func workerPool(count int, work func(), done func()) {
@@ -426,10 +419,11 @@ func churn(newIndex <-chan float64, newData chan<- datum) {
 	for index := range newIndex {
 		id := int(index)
 		url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d", id)
-		for attempts := 0; true; attempts += 1 {
+		for attempts := 0; true; attempts++ {
 
 			if attempts > 0 {
 				// If we're having no luck after this much time, we'll declare this sucker the walking undead and try to get to it later.
+				// XXX Some of these zombies don't exist on HN itself while others do; a nice piece of future work might be to use a more traditional HTML scraper to try to fix these up.
 				if attempts > 10 {
 					fmt.Printf("Braaaaiiinnnssss %d\n", id)
 					sendDatum(newData, "zombie", index, map[string]types.Value{
