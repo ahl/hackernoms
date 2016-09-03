@@ -151,7 +151,7 @@ func main() {
 			newIndex <- index
 		}
 
-		for index := float64(startKey); index < maxItem; index += 1.0 {
+		for index := float64(startKey); index <= maxItem; index++ {
 		sent:
 			for {
 				select {
