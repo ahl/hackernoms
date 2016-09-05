@@ -493,13 +493,4 @@ func sendDatum(newData chan<- datum, name string, id float64, data map[string]ty
 	}
 
 	newData <- d
-
-	/*
-		select {
-		case newData <- d:
-		default:
-			fmt.Println("blocked")
-			newData <- d
-		}
-	*/
 }
