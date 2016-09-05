@@ -155,17 +155,23 @@ func main() {
 		sent:
 			for {
 				select {
-				case newIndex <- index:
-					break sent
 				case event := <-newUpdate:
 					items := event.Data.(map[string]interface{})["items"].([]interface{})
 					for _, item := range items {
-						if item.(float64) > maxItem {
-							maxItem = item.(float64)
+						id := item.(float64)
+						// If we've already processed this, do it again.
+						if id < index {
+							newIndex <- id
+						}
+						// Bump up our iteration target.
+						if id > maxItem {
+							maxItem = id
 						}
 					}
 
 					fmt.Println("got a new update ", int(maxItem))
+				case newIndex <- index:
+					break sent
 				}
 			}
 		}
