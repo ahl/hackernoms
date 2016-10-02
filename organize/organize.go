@@ -12,7 +12,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/attic-labs/noms/go/dataset"
+	"github.com/attic-labs/noms/go/datas"
 	"github.com/attic-labs/noms/go/hash"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
@@ -75,21 +75,21 @@ func main() {
 	}
 
 	// Just make sure that the source is valid
-	source, err := spec.GetDataset(os.Args[1])
+	srcdb, _, err := spec.GetDataset(os.Args[1])
 	if err != nil {
 		fmt.Printf("invalid source dataset: %s\n", os.Args[1])
 		fmt.Printf("%s\n", err)
 		return
 	}
-	source.Database().Close()
+	srcdb.Close()
 
-	ds, err := spec.GetDataset(os.Args[2])
+	db, ds, err := spec.GetDataset(os.Args[2])
 	if err != nil {
 		fmt.Printf("invalid destination dataset: %s\n", os.Args[2])
 		fmt.Printf("%s\n", err)
 		return
 	}
-	defer ds.Database().Close()
+	defer db.Close()
 
 	// Create our types.
 	optionString := types.MakeUnionType(types.StringType, nothingType)
@@ -137,7 +137,7 @@ func main() {
 	dstHead := hv.(types.Struct)
 
 	for {
-		ns, err := spec.GetDataset(os.Args[1])
+		srcdb, srcds, err := spec.GetDataset(os.Args[1])
 		if err != nil {
 			panic(err)
 		}
@@ -145,35 +145,35 @@ func main() {
 		dstHead = ds.HeadValue().(types.Struct)
 
 		oldHeadHash := hash.Parse(string(dstHead.Get("head").(types.String)))
-		oldHead := ns.Database().ReadValue(oldHeadHash).(types.Struct).Get("value").(types.Struct)
-		currentHead := ns.HeadValue().(types.Struct)
+		oldHead := srcdb.ReadValue(oldHeadHash).(types.Struct).Get("value").(types.Struct)
+		currentHead := srcds.HeadValue().(types.Struct)
 
 		if oldHead.Equals(currentHead) {
-			fmt.Println("no changes")
+			// This is designed to run in a loop, but either Noms or Go is profoundly sloppy with memory. Put the loop outside the scope of this program (i.e. in the shell or an AWS ECS task) so that we get a fresh address space each time.
+			fmt.Println("no changes; exiting")
+			break
 		} else {
 			dstHead = update(ds, oldHead, currentHead, dstHead)
-			dstHead = dstHead.Set("head", types.String(ns.Head().Hash().String()))
+			dstHead = dstHead.Set("head", types.String(srcds.Head().Hash().String()))
 
-			ds, err = ds.CommitValue(dstHead)
+			ds, err = db.CommitValue(ds, dstHead)
 			if err != nil {
 				panic(err)
 			}
 		}
 
-		ns.Database().Close()
-
-		time.Sleep(1 * time.Second)
+		srcdb.Close()
 	}
 }
 
-func bigSync(ds dataset.Dataset) dataset.Dataset {
-	source, err := spec.GetDataset(os.Args[1])
+func bigSync(ds datas.Dataset) datas.Dataset {
+	srcdb, srcds, err := spec.GetDataset(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
-	defer source.Database().Close()
+	defer srcdb.Close()
 
-	head := source.HeadValue().(types.Struct)
+	head := srcds.HeadValue().(types.Struct)
 	allItems := head.Get("items").(types.Map)
 	topStories := head.Get("top").(types.List)
 
@@ -234,10 +234,10 @@ func bigSync(ds dataset.Dataset) dataset.Dataset {
 
 	top := topList(ds, topStories, stories)
 
-	ds, err = ds.CommitValue(types.NewStruct("HackerNoms", types.StructData{
+	srcds, err = srcdb.CommitValue(srcds, types.NewStruct("HackerNoms", types.StructData{
 		"stories": stories,
 		"top":     top,
-		"head":    types.String(source.Head().Hash().String()),
+		"head":    types.String(srcds.Head().Hash().String()),
 	}))
 	if err != nil {
 		panic(err)
@@ -253,7 +253,7 @@ func makeStories(allItems types.Map, newItem <-chan types.Struct, newStory chan<
 			fmt.Printf("working on story %d\n", int(id.(types.Number)))
 
 			// Known stubs with just id and type
-			if fields := item.ChildValues(); len(fields) == 2 {
+			if item.Type().Desc.(types.StructDesc).Len() == 2 {
 				item.Get("type") // or panic
 				continue
 			}
@@ -336,8 +336,8 @@ func comments(item types.Value, allItems types.Map) types.Value {
 	return ret
 }
 
-func topList(ds dataset.Dataset, srcTop types.List, dstStories types.Map) types.List {
-	streamData := make(chan types.Value, 100)
+func topList(ds datas.Dataset, srcTop types.List, dstStories types.Map) types.List {
+	streamData := make(chan types.Value, 10)
 	newList := types.NewStreamingList(ds.Database(), streamData)
 
 	srcTop.IterAll(func(item types.Value, _ uint64) {
@@ -372,7 +372,7 @@ func topList(ds dataset.Dataset, srcTop types.List, dstStories types.Map) types.
 	return top
 }
 
-func update(ds dataset.Dataset, old types.Value, new types.Value, dest types.Struct) types.Struct {
+func update(ds datas.Dataset, old types.Value, new types.Value, dest types.Struct) types.Struct {
 	// 1. Diff old and new
 	// 2. For each changed id, find the changed story
 	// 3. For each changed story reprocess and update the map

@@ -16,7 +16,7 @@ import (
 
 	"github.com/zabawaba99/firego"
 
-	"github.com/attic-labs/noms/go/dataset"
+	"github.com/attic-labs/noms/go/datas"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 )
@@ -43,12 +43,12 @@ func main() {
 		return
 	}
 
-	ds, err := spec.GetDataset(flag.Arg(0))
+	db, ds, err := spec.GetDataset(flag.Arg(0))
 	if err != nil {
 		fmt.Printf("Could not parse destination dataset: %s\n", err)
 		return
 	}
-	defer ds.Database().Close()
+	defer db.Close()
 
 	hv, ok := ds.MaybeHeadValue()
 
@@ -62,7 +62,7 @@ func main() {
 
 		// Our first sync really just needs to get all the read-only data, therefore we don't need to worry about updates. We'll get potentially changed data later.
 		hv = bigSync(ds)
-		nds, err := ds.CommitValue(hv)
+		nds, err := db.CommitValue(ds, hv)
 		if err != nil {
 			panic(err)
 		}
@@ -70,7 +70,7 @@ func main() {
 	}
 
 	update := firego.New("https://hacker-news.firebaseio.com/v0/updates", nil)
-	newUpdate := make(chan firego.Event, 1000)
+	newUpdate := make(chan firego.Event, 100)
 	if err := update.Watch(newUpdate); err != nil {
 		panic(err)
 	}
@@ -83,7 +83,7 @@ func main() {
 			head := <-newHead
 			if !head.Equals(oldHead) {
 				fmt.Println("committing")
-				nds, err := ds.CommitValue(head)
+				nds, err := db.CommitValue(ds, head)
 				if err != nil {
 					panic(err)
 				}
@@ -138,7 +138,7 @@ func main() {
 		panic(err)
 	}
 
-	newIndex := make(chan float64, 100)
+	newIndex := make(chan float64, 20)
 
 	// These items may update beyond the standard two week window.
 	specialIndices := []float64{
@@ -178,9 +178,9 @@ func main() {
 		close(newIndex)
 	}()
 
-	newDatum := make(chan datum, 100)
+	newDatum := make(chan datum, 20)
 
-	workerPool(100, func() {
+	workerPool(10, func() {
 		churn(newIndex, newDatum)
 	}, func() {
 		close(newDatum)
@@ -203,7 +203,7 @@ func main() {
 
 	// Enter the steady state where we keep up with ongoing updates.
 	newIndex = make(chan float64, 1)
-	newDatum = make(chan datum, 100)
+	newDatum = make(chan datum, 10)
 
 	workerPool(1, func() {
 		churn(newIndex, newDatum)
@@ -286,7 +286,7 @@ func main() {
 	}
 }
 
-func bigSync(ds dataset.Dataset) types.Value {
+func bigSync(ds datas.Dataset) types.Value {
 	max := firego.New("https://hacker-news.firebaseio.com/v0/maxitem", nil)
 	var maxItem float64
 	if err := max.Value(&maxItem); err != nil {

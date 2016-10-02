@@ -1,0 +1,6 @@
+[submodule "vendor/github.com/attic-labs/noms"]
+	path = vendor/github.com/attic-labs/noms
+	url = https://github.com/attic-labs/noms
+[submodule "vendor/github.com/zabawaba99/firego"]
+	path = vendor/github.com/zabawaba99/firego
+	url = https://github.com/zabawaba99/firego
